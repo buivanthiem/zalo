@@ -7,6 +7,16 @@ const app = express();
 app.use(express.json());
 app.use(express.static("public"));
 
+app.use(cors({
+  origin: [
+    "https://ca.futurehomes.vn",
+    "http://localhost:3000"
+  ],
+  methods: ["GET", "POST"],
+  credentials: true
+}));
+app.options("*", cors());
+
 // 🔥 CONFIG
 const PORT = process.env.PORT || 3000;
 const BASE_PATH = process.env.BASE_PATH || "/zalo"; // cPanel dùng /zalo
