@@ -5,9 +5,14 @@ const path = require("path");
 const { Zalo } = require("zalo-api-final");
 
 const app = express();
-app.use(express.json());
-app.use(express.static("public"));
 
+// ================= CONFIG =================
+const PORT = process.env.PORT || 3000;
+const BASE_PATH = process.env.BASE_PATH || "/zalo";
+const PROXY = process.env.PROXY || "";
+const SESSION_DIR = path.join(process.cwd(), "sessions");
+
+// ================= MIDDLEWARE =================
 app.use(cors({
   origin: [
     "https://ca.futurehomes.vn",
@@ -17,31 +22,33 @@ app.use(cors({
   credentials: true
 }));
 
-// 🔥 CONFIG
-const PORT = process.env.PORT || 3000;
-const BASE_PATH = process.env.BASE_PATH || "/zalo"; // cPanel dùng /zalo
-const PROXY = process.env.PROXY || "";
+app.use(express.json());
+app.use(express.static("public"));
 
-// Session in-memory (MVP)
-const sessions = new Map();
+// tạo thư mục sessions nếu chưa có
+fs.mkdirSync(SESSION_DIR, { recursive: true });
 
-// Cleanup session sau 5 phút
-function autoCleanup(sessionId) {
-  setTimeout(() => {
-    const session = sessions.get(sessionId);
-    if (session) {
-      console.log(`[${sessionId}] Auto cleanup`);
-      try {
-        session.api?.listener?.stop();
-      } catch {}
-      sessions.delete(sessionId);
-    }
-  }, 5 * 60 * 1000);
+// ================= HELPER =================
+function getSessionPath(sessionId) {
+  return path.join(SESSION_DIR, `${sessionId}.json`);
 }
 
-// ─────────────────────────────
-// ROUTER
-// ─────────────────────────────
+function saveSession(sessionId, data) {
+  fs.writeFileSync(getSessionPath(sessionId), JSON.stringify(data, null, 2));
+}
+
+function loadSession(sessionId) {
+  const file = getSessionPath(sessionId);
+  if (!fs.existsSync(file)) return null;
+  return JSON.parse(fs.readFileSync(file));
+}
+
+function deleteSession(sessionId) {
+  const file = getSessionPath(sessionId);
+  if (fs.existsSync(file)) fs.unlinkSync(file);
+}
+
+// ================= ROUTER =================
 const router = express.Router();
 
 /**
@@ -75,100 +82,96 @@ router.post("/login/qr", async (req, res) => {
 
     const zalo = new Zalo(zaloOptions);
 
-    const session = {
+    // tạo session ban đầu
+    let session = {
       status: "pending",
-      credentials: null,
       userInfo: null,
-      api: null,
+      credentials: null,
     };
 
-    sessions.set(sessionId, session);
-    autoCleanup(sessionId);
+    saveSession(sessionId, session);
 
-    // Timeout QR
+    console.log(`[${sessionId}] CREATE SESSION`);
+
+    // timeout QR
     const timeoutId = setTimeout(() => {
+      console.log(`[${sessionId}] TIMEOUT QR`);
+      deleteSession(sessionId);
       rejectQR(new Error("Timeout tạo QR"));
-      sessions.delete(sessionId);
     }, 60000);
 
-    // Login QR
-    zalo
-      .loginQR(null, (qrEvent) => {
-        const s = sessions.get(sessionId);
-        if (!s) return;
+    // login QR
+    zalo.loginQR(null, (qrEvent) => {
+      let s = loadSession(sessionId);
+      if (!s) {
+        console.log(`[${sessionId}] ❌ Session file không tồn tại`);
+        return;
+      }
 
-        switch (qrEvent.type) {
-          case 0: // QR
-            if (qrEvent?.data?.image) {
-              clearTimeout(timeoutId);
-              resolveQR(qrEvent.data.image);
-              s.status = "waiting_scan";
-            }
-            break;
+      console.log(`[${sessionId}] EVENT:`, qrEvent.type);
 
-          case 1: // expired
-            s.status = "expired";
-            break;
+      switch (qrEvent.type) {
+        case 0: // QR
+          if (qrEvent?.data?.image) {
+            clearTimeout(timeoutId);
+            s.status = "waiting_scan";
+            saveSession(sessionId, s);
+            resolveQR(qrEvent.data.image);
+          }
+          break;
 
-          case 2: // scanned
-            s.status = "scanned";
-            if (qrEvent?.data) {
-              s.userInfo = {
-                name: qrEvent.data.display_name,
-                avatar: qrEvent.data.avatar,
-              };
-            }
-            break;
+        case 1: // expired
+          s.status = "expired";
+          saveSession(sessionId, s);
+          break;
 
-          case 3: // declined
-            s.status = "declined";
-            break;
+        case 2: // scanned
+          s.status = "scanned";
+          if (qrEvent?.data) {
+            s.userInfo = {
+              name: qrEvent.data.display_name,
+              avatar: qrEvent.data.avatar,
+            };
+          }
+          saveSession(sessionId, s);
+          break;
 
-          case 4: // success
-            if (qrEvent?.data) {
-              s.status = "success";
+        case 3: // declined
+          s.status = "declined";
+          saveSession(sessionId, s);
+          break;
 
-              s.credentials = {
-                cookie: JSON.stringify(qrEvent.data.cookie || []),
-                imei: qrEvent.data.imei || "",
-                userAgent: qrEvent.data.userAgent || "",
-                proxy: proxy || "",
-              };
+        case 4: // success
+          if (qrEvent?.data) {
+            s.status = "success";
 
-              // 🔥 Lưu theo sessionId (không ghi đè)
-              const filePath = path.join(
-                __dirname,
-                "sessions",
-                `${sessionId}.json`
-              );
+            s.credentials = {
+              cookie: JSON.stringify(qrEvent.data.cookie || []),
+              imei: qrEvent.data.imei || "",
+              userAgent: qrEvent.data.userAgent || "",
+              proxy: proxy || "",
+            };
 
-              fs.mkdirSync(path.dirname(filePath), { recursive: true });
-              fs.writeFileSync(filePath, JSON.stringify(s.credentials, null, 2));
+            saveSession(sessionId, s);
+            console.log(`[${sessionId}] ✅ SAVED CREDENTIALS`);
+          }
+          break;
+      }
+    })
+    .then((api) => {
+      api.listener.start();
 
-              console.log(`[${sessionId}] Saved credentials`);
-            }
-            break;
-        }
-
-        sessions.set(sessionId, s);
-      })
-      .then((api) => {
-        const s = sessions.get(sessionId);
-        if (!s) return;
-
-        s.api = api;
-
-        api.listener.start();
-        api.listener.onConnected(() =>
-          console.log(`[${sessionId}] Connected`)
-        );
-        api.listener.onError((err) =>
-          console.error(`[${sessionId}] Zalo error:`, err)
-        );
-      })
-      .catch((err) => {
-        rejectQR(err);
+      api.listener.onConnected(() => {
+        console.log(`[${sessionId}] CONNECTED`);
       });
+
+      api.listener.onError((err) => {
+        console.error(`[${sessionId}] ERROR:`, err);
+      });
+    })
+    .catch((err) => {
+      rejectQR(err);
+    });
 
     const qrBase64 = await qrPromise;
 
@@ -177,8 +180,9 @@ router.post("/login/qr", async (req, res) => {
       sessionId,
       qr: qrBase64,
     });
+
   } catch (err) {
-    sessions.delete(sessionId);
+    deleteSession(sessionId);
     res.status(500).json({
       success: false,
       error: err.message,
@@ -190,7 +194,7 @@ router.post("/login/qr", async (req, res) => {
  * GET /login/status/:sessionId
  */
 router.get("/login/status/:sessionId", (req, res) => {
-  const session = sessions.get(req.params.sessionId);
+  const session = loadSession(req.params.sessionId);
 
   if (!session) {
     return res.status(404).json({
@@ -200,19 +204,10 @@ router.get("/login/status/:sessionId", (req, res) => {
   }
 
   if (session.status === "success") {
-    const credentials = session.credentials;
-
-    // cleanup luôn
-    try {
-      session.api?.listener?.stop();
-    } catch {}
-
-    sessions.delete(req.params.sessionId);
-
     return res.json({
       success: true,
       status: "success",
-      credentials,
+      credentials: session.credentials,
     });
   }
 
@@ -223,15 +218,14 @@ router.get("/login/status/:sessionId", (req, res) => {
   });
 });
 
-// Gắn base path (QUAN TRỌNG)
+// ================= ROUTE =================
 app.use(BASE_PATH, router);
 
-// Root check
 app.get("/", (req, res) => {
   res.send("Zalo QR Login Server Running 🚀");
 });
 
-// Start server
+// ================= START =================
 app.listen(PORT, () => {
   console.log(`\n✅ Server running at port ${PORT}`);
   console.log(`👉 Base path: ${BASE_PATH}`);
