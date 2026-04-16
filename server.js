@@ -8,7 +8,7 @@ const app = express();
 app.use(express.json());
 app.use(express.static("public"));
 
-app.use(cors({
+pp.use(cors({
   origin: [
     "https://ca.futurehomes.vn",
     "http://localhost:3000"
@@ -16,7 +16,6 @@ app.use(cors({
   methods: ["GET", "POST"],
   credentials: true
 }));
-app.options("*", cors());
 
 // 🔥 CONFIG
 const PORT = process.env.PORT || 3000;
