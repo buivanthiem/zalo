@@ -8,7 +8,7 @@ const app = express();
 app.use(express.json());
 app.use(express.static("public"));
 
-pp.use(cors({
+app.use(cors({
   origin: [
     "https://ca.futurehomes.vn",
     "http://localhost:3000"
